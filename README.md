@@ -1,8 +1,19 @@
 Subvert
 =======
 
-Package subvert provides functions for subverting go's type system and exposing
-its internals.
+Package subvert provides functions to subvert go's type protections and
+expose unexported values & functions.
+
+This is not a power to be taken lightly! It's expected that you're fully
+versed in how the go type system works, and why there are protections and
+restrictions in the first place. Using this package incorrectly will quickly
+lead to undefined behavior and bizarre crashes, even segfaults or nuclear
+missile launches.
+
+YOU HAVE BEEN WARNED!
+
+
+#### Note:
 
 As this package modifies internal type data, there's no guarantee that it
 will continue to work in future versions of go (although an incompatible
@@ -12,13 +23,6 @@ when this package is built using that particular version of go. It's on you
 to check `IsEnabled()` as part of your CI process (or just run the unit tests
 in this package).
 
-This is not a power to be taken lightly! It's expected that you're fully
-versed in how the go type system works, and why there are protections and
-restrictions in the first place. Using this package incorrectly will quickly
-lead to undefined behavior and bizarre crashes, even segfaults or nuclear
-missile launches.
-
-YOU HAVE BEEN WARNED!
 
 
 Example
@@ -60,8 +64,9 @@ func Demonstrate() {
 	subvert.MakeAddressable(&rv)
 	fmt.Printf("Pointer to v: %v\n", rv.Addr())
 
-	f := subvert.ExposeFunction("reflect.methodName", (func() string)(nil)).(func() string)
-	if f != nil {
+	exposed := ExposeFunction("reflect.methodName", (func() string)(nil))
+	if exposed != nil {
+		f := exposed.(func() string)
 		fmt.Printf("Result of reflect.methodName: %v\n", f())
 	}
 }

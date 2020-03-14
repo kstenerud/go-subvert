@@ -1,4 +1,5 @@
-// Package subvert provides functions for subverting go's type system.
+// Package subvert provides functions to subvert go's type protections and
+// expose unexported values & functions.
 //
 // As this package modifies internal type data, there's no guarantee that it
 // will continue to work in future versions of go (although an incompatible
@@ -18,7 +19,6 @@ package subvert
 
 import (
 	"bytes"
-	"debug/elf"
 	"debug/gosym"
 	"fmt"
 	"log"
@@ -57,31 +57,28 @@ func MakeAddressable(v *reflect.Value) {
 // ExposeFunction exposes a function or method, allowing you to bypass export
 // restrictions. It looks for the symbol specified by funcSymName and returns a
 // function with its implementation, or nil if the symbol wasn't found.
-// templateFunc MUST be the correct function type, or else undefined behavior
+//
+// funcSymName must be the exact symbol name from the binary. Use AllFunctions()
+// to find it. If your program doesn't have any references to a function, it
+// will be omitted from the binary during compilation. You can prevent this by
+// saving a reference to it somewhere, or calling a function that indirectly
+// references it.
+//
+// templateFunc MUST have the correct function type, or else undefined behavior
 // will result!
 //
-// funcSymName must be the exact symbol name from the binary. Use your developer
-// tools to find it (for example, on Linux: `readelf -s myexe`)
-//
 // Example:
-//   f := subvert.ExposeFunction("reflect.methodName", (func() string)(nil)).(func() string)
-//   if f != nil {
-// 	     fmt.Println(f())
+//   exposed := ExposeFunction("reflect.methodName", (func() string)(nil))
+//   if exposed != nil {
+//       f := exposed.(func() string)
+//       fmt.Printf("Result of reflect.methodName: %v\n", f())
 //   }
-//
-// Note: If your program doesn't have any references to the function you're
-// interested in, either directly or indirectly, it will be omitted from the
-// binary during compilation. You can prevent this by saving a reference to it
-// somewhere, or calling a function that indirectly references it.
-//
-// Currently, this function only works in Linux.
 func ExposeFunction(funcSymName string, templateFunc interface{}) interface{} {
-	// TODO: Support other systems
 	assertIsEnabled()
+	loadSymbolTable()
 	if symTableLoadFailed {
 		return nil
 	}
-	loadSymbolTableLinux()
 
 	fn := symTable.LookupFunc(funcSymName)
 	if fn == nil {
@@ -96,6 +93,17 @@ func ExposeFunction(funcSymName string, templateFunc interface{}) interface{} {
 	*fPtr = unsafe.Pointer(uintptr(fn.Entry))
 	*getFlagPtr(&rf) = oldFlag
 	return rf.Interface()
+}
+
+// AllFunctions returns the name of every function that has been compiled
+// into the current binary. Use it as a debug helper to see if a function
+// has been compiled in or not.
+func AllFunctions() (functions map[string]bool) {
+	functions = make(map[string]bool)
+	for _, function := range symTable.Funcs {
+		functions[function.Name] = true
+	}
+	return
 }
 
 const failureFmt = "go-subvert is disabled because %v. Please open an issue " +
@@ -162,47 +170,45 @@ func getFlagPtr(v *reflect.Value) *uintptr {
 	return (*uintptr)(unsafe.Pointer(uintptr(unsafe.Pointer(v)) + flagOffset))
 }
 
-func loadSymbolTableLinux() {
+func loadSymbolTable() {
 	if symTable != nil || symTableLoadFailed {
 		return
 	}
 
-	// Try to load from memory first
-	const elfStartAddress = uintptr(0x400000)
-	const maxSize = 0x10000000
-	processMemory := (*[maxSize]byte)(unsafe.Pointer(elfStartAddress))[:maxSize:maxSize]
-	exe, err := elf.NewFile(bytes.NewReader(processMemory))
-	if err != nil {
-		// Failing that, load a copy from disk
-		exePath, err := os.Executable()
-		if err != nil {
-			symTableLoadFailed = true
-			log.Printf("subvert: Error finding executable: %v", err)
-			return
-		}
-
-		exe, err = elf.Open(exePath)
-		if err != nil {
-			symTableLoadFailed = true
-			log.Printf("subvert: Error opening %v: %v", exePath, err)
+	var err error
+	if canLoadSymbolsFromMemory {
+		symTable, err = loadSymbolsFromMemory()
+		if err == nil {
 			return
 		}
 	}
-	defer exe.Close()
 
-	lineTableData, err := exe.Section(".gopclntab").Data()
+	symTable, err = loadSymbolsFromExe()
 	if err != nil {
+		log.Printf("subvert: Error loading symbol table: %v", err)
 		symTableLoadFailed = true
-		log.Printf("subvert: Error reading .gopclntab data: %v", err)
 		return
 	}
 
-	addr := exe.Section(".text").Addr
-	lineTable := gosym.NewLineTable(lineTableData, addr)
-	symTable, err = gosym.NewTable([]byte{}, lineTable)
+}
+
+func loadSymbolsFromMemory() (symTable *gosym.Table, err error) {
+	const maxSize = 0x10000000
+	processMemory := (*[maxSize]byte)(unsafe.Pointer(processStartAddress))[:maxSize:maxSize]
+	reader := bytes.NewReader(processMemory)
+	return readSymbols(reader)
+}
+
+func loadSymbolsFromExe() (symTable *gosym.Table, err error) {
+	exePath, err := os.Executable()
 	if err != nil {
-		symTableLoadFailed = true
-		log.Printf("subvert: Error creating symbol table: %v", err)
-		symTable = nil
+		return
 	}
+
+	reader, err := os.Open(exePath)
+	if err != nil {
+		return
+	}
+
+	return readSymbols(reader)
 }

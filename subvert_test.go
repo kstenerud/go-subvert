@@ -3,6 +3,7 @@ package subvert
 import (
 	"fmt"
 	"reflect"
+	"runtime"
 	"testing"
 )
 
@@ -34,9 +35,13 @@ func Demonstrate() {
 	MakeAddressable(&rv)
 	fmt.Printf("Pointer to v: %v\n", rv.Addr())
 
-	f := ExposeFunction("reflect.methodName", (func() string)(nil)).(func() string)
-	if f != nil {
-		fmt.Printf("Result of reflect.methodName: %v\n", f())
+	// The test rig messes up PE symbols somehow
+	if runtime.GOOS != "windows" {
+		exposed := ExposeFunction("reflect.methodName", (func() string)(nil))
+		if exposed != nil {
+			f := exposed.(func() string)
+			fmt.Printf("Result of reflect.methodName: %v\n", f())
+		}
 	}
 }
 
@@ -113,4 +118,11 @@ func TestExposeFunction(t *testing.T) {
 			t.Errorf("Expected [%v] but got [%v]", expected, actual)
 		}
 	})
+}
+
+func TestListAllFunctions(t *testing.T) {
+	funcs := AllFunctions()
+	if len(funcs) == 0 {
+		t.Errorf("Expected at least one function")
+	}
 }
