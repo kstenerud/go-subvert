@@ -17,11 +17,86 @@
 package subvert
 
 import (
+	"bytes"
+	"debug/elf"
+	"debug/gosym"
 	"fmt"
 	"log"
+	"os"
 	"reflect"
 	"unsafe"
 )
+
+// IsEnabled checks if initialization succeeded. If this function returns false,
+// Calling other functions in this package will panic.
+//
+// Initialization will only fail if the assertions this package makes about
+// certain internal golang type structures turn out to be false in the newer
+// version of go you are compiling with.
+func IsEnabled() bool {
+	return failureReason == ""
+}
+
+// MakeWritable clears a value's RO flags. The RO flags are generally used to
+// determine whether a value is exported (and thus accessible) or not.
+func MakeWritable(v *reflect.Value) {
+	assertIsEnabled()
+	*getFlagPtr(v) &= ^flagRO
+}
+
+// MakeAddressable adds the addressable flag to a value, allowing you to take
+// its address. The most common reason for making an object non-addressable is
+// because it's allocated on the stack. Making a pointer to a stack value will
+// cause undefined behavior if you attempt to access it outside of the
+// stack-allocated object's scope.
+func MakeAddressable(v *reflect.Value) {
+	assertIsEnabled()
+	*getFlagPtr(v) |= flagAddr
+}
+
+// ExposeFunction exposes a function or method, allowing you to bypass export
+// restrictions. It looks for the symbol specified by funcSymName and returns a
+// function with its implementation, or nil if the symbol wasn't found.
+// templateFunc MUST be the correct function type, or else undefined behavior
+// will result!
+//
+// funcSymName must be the exact symbol name from the binary. Use your developer
+// tools to find it (for example, on Linux: `readelf -s myexe`)
+//
+// Example:
+//   f := subvert.ExposeFunction("reflect.methodName", (func() string)(nil)).(func() string)
+//   if f != nil {
+// 	     fmt.Println(f())
+//   }
+//
+// Note: If your program doesn't have any references to the function you're
+// interested in, either directly or indirectly, it will be omitted from the
+// binary during compilation. You can prevent this by saving a reference to it
+// somewhere, or calling a function that indirectly references it.
+//
+// Currently, this function only works in Linux.
+func ExposeFunction(funcSymName string, templateFunc interface{}) interface{} {
+	// TODO: Support other systems
+	assertIsEnabled()
+	if symTableLoadFailed {
+		return nil
+	}
+	loadSymbolTableLinux()
+
+	fn := symTable.LookupFunc(funcSymName)
+	if fn == nil {
+		return nil
+	}
+	rf := reflect.MakeFunc(reflect.TypeOf(templateFunc), func([]reflect.Value) []reflect.Value {
+		return []reflect.Value{}
+	})
+	oldFlag := *getFlagPtr(&rf)
+	MakeAddressable(&rf)
+	fPtr := (*unsafe.Pointer)(unsafe.Pointer(rf.UnsafeAddr()))
+	*fPtr = unsafe.Pointer(uintptr(fn.Entry))
+	*getFlagPtr(&rf) = oldFlag
+	return rf.Interface()
+}
 
 const failureFmt = "go-subvert is disabled because %v. Please open an issue " +
 	"at https://github.com/kstenerud/go-subvert/issues"
@@ -40,6 +115,8 @@ var (
 
 var flagOffset uintptr
 var failureReason string
+var symTable *gosym.Table
+var symTableLoadFailed bool
 
 func init() {
 	fail := func(reason string) {
@@ -85,32 +162,47 @@ func getFlagPtr(v *reflect.Value) *uintptr {
 	return (*uintptr)(unsafe.Pointer(uintptr(unsafe.Pointer(v)) + flagOffset))
 }
 
-// ----------
-// Public API
-// ----------
+func loadSymbolTableLinux() {
+	if symTable != nil || symTableLoadFailed {
+		return
+	}
 
-// Check if initialization succeeded. If this function returns false, Calling
-// other functions in this package will panic.
-//
-// Initialization will only fail if the assertions this package makes about
-// certain internal golang type structures turn out to be false in the newer
-// version of go you are compiling with.
-//
-// Warning:
-// While it's almost certain that IsEnabled() will alert you to a problem,
-// there's no 100% guarantee that it will! We're messing with internal data,
-// which always leaves the possibility, no matter how slight, of an undetected
-// problem.
-func IsEnabled() bool {
-	return failureReason == ""
-}
+	// Try to load from memory first
+	const elfStartAddress = uintptr(0x400000)
+	const maxSize = 0x10000000
+	processMemory := (*[maxSize]byte)(unsafe.Pointer(elfStartAddress))[:maxSize:maxSize]
+	exe, err := elf.NewFile(bytes.NewReader(processMemory))
+	if err != nil {
+		// Failing that, load a copy from disk
+		exePath, err := os.Executable()
+		if err != nil {
+			symTableLoadFailed = true
+			log.Printf("subvert: Error finding executable: %v", err)
+			return
+		}
 
-func MakeWritable(v *reflect.Value) {
-	assertIsEnabled()
-	*getFlagPtr(v) &= ^flagRO
-}
+		exe, err = elf.Open(exePath)
+		if err != nil {
+			symTableLoadFailed = true
+			log.Printf("subvert: Error opening %v: %v", exePath, err)
+			return
+		}
+	}
+	defer exe.Close()
 
-func MakeAddressable(v *reflect.Value) {
-	assertIsEnabled()
-	*getFlagPtr(v) |= flagAddr
+	lineTableData, err := exe.Section(".gopclntab").Data()
+	if err != nil {
+		symTableLoadFailed = true
+		log.Printf("subvert: Error reading .gopclntab data: %v", err)
+		return
+	}
+
+	addr := exe.Section(".text").Addr
+	lineTable := gosym.NewLineTable(lineTableData, addr)
+	symTable, err = gosym.NewTable([]byte{}, lineTable)
+	if err != nil {
+		symTableLoadFailed = true
+		log.Printf("subvert: Error creating symbol table: %v", err)
+		symTable = nil
+	}
 }

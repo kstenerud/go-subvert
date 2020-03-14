@@ -33,12 +33,17 @@ func Demonstrate() {
 	// rv.Addr() // This would panic
 	MakeAddressable(&rv)
 	fmt.Printf("Pointer to v: %v\n", rv.Addr())
+
+	f := ExposeFunction("reflect.methodName", (func() string)(nil)).(func() string)
+	if f != nil {
+		fmt.Printf("Result of reflect.methodName: %v\n", f())
+	}
 }
 
-func doesFunctionPanic(function func()) (didPanic bool) {
+func getPanic(function func()) (result interface{}) {
 	defer func() {
 		if e := recover(); e != nil {
-			didPanic = true
+			result = e
 		}
 	}()
 
@@ -47,8 +52,14 @@ func doesFunctionPanic(function func()) (didPanic bool) {
 }
 
 func assertPanics(t *testing.T, function func()) {
-	if !doesFunctionPanic(function) {
+	if getPanic(function) == nil {
 		t.Errorf("Expected function to panic")
+	}
+}
+
+func assertDoesNotPanic(t *testing.T, function func()) {
+	if err := getPanic(function); err != nil {
+		t.Errorf("Unexpected panic: %v", err)
 	}
 }
 
@@ -87,4 +98,19 @@ func TestWritable(t *testing.T) {
 	assertPanics(t, func() { rv_int.Interface() })
 	MakeWritable(&rv_int)
 	rv_int.Interface()
+}
+
+func TestExposeFunction(t *testing.T) {
+	assertDoesNotPanic(t, func() {
+		f := ExposeFunction("reflect.methodName", (func() string)(nil)).(func() string)
+		if f == nil {
+			t.Errorf("Cannot find reflect.methodName. This test is no longer valid.")
+			return
+		}
+		expected := "github.com/kstenerud/go-subvert.getPanic"
+		actual := f()
+		if actual != expected {
+			t.Errorf("Expected [%v] but got [%v]", expected, actual)
+		}
+	})
 }

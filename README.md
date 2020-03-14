@@ -1,7 +1,8 @@
 Subvert
 =======
 
-Package subvert provides functions for subverting go's type system.
+Package subvert provides functions for subverting go's type system and exposing
+its internals.
 
 As this package modifies internal type data, there's no guarantee that it
 will continue to work in future versions of go (although an incompatible
@@ -14,8 +15,8 @@ in this package).
 This is not a power to be taken lightly! It's expected that you're fully
 versed in how the go type system works, and why there are protections and
 restrictions in the first place. Using this package incorrectly will quickly
-lead to undefined behavior and bizarre crashes, perhaps even segfaults or
-nuclear missile launches.
+lead to undefined behavior and bizarre crashes, even segfaults or nuclear
+missile launches.
 
 YOU HAVE BEEN WARNED!
 
@@ -27,6 +28,8 @@ Example
 import (
 	"fmt"
 	"reflect"
+
+	"github.com/kstenerud/go-subvert"
 )
 
 type SubvertTester struct {
@@ -46,16 +49,21 @@ func Demonstrate() {
 	fmt.Printf("Interface of A: %v\n", rv_A.Interface())
 
 	// rv_a.Interface() // This would panic
-	MakeWritable(&rv_a)
+	subvert.MakeWritable(&rv_a)
 	fmt.Printf("Interface of a: %v\n", rv_a.Interface())
 
 	// rv_int.Interface() // This would panic
-	MakeWritable(&rv_int)
+	subvert.MakeWritable(&rv_int)
 	fmt.Printf("Interface of int: %v\n", rv_int.Interface())
 
 	// rv.Addr() // This would panic
-	MakeAddressable(&rv)
+	subvert.MakeAddressable(&rv)
 	fmt.Printf("Pointer to v: %v\n", rv.Addr())
+
+	f := subvert.ExposeFunction("reflect.methodName", (func() string)(nil)).(func() string)
+	if f != nil {
+		fmt.Printf("Result of reflect.methodName: %v\n", f())
+	}
 }
 ```
 
@@ -66,6 +74,7 @@ Interface of A: 1
 Interface of a: 2
 Interface of int: 3
 Pointer to v: &{1 2 3}
+Result of reflect.methodName: github.com/kstenerud/go-subvert.TestDemonstrate
 ```
 
 
