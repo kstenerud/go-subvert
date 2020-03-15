@@ -1,19 +1,12 @@
-// Package subvert provides functions to subvert go's type protections and
-// expose unexported values & functions.
-//
-// As this package modifies internal type data, there's no guarantee that it
-// will continue to work in future versions of go (although an incompatible
-// change has yet to happen, so it seems stable enough). If, in future, an
-// incompatible change were to be introduced, `IsEnabled()` would return false
-// when this package is built using that particular version of go. It's on you
-// to check `IsEnabled()` as part of your CI process.
+// Package subvert provides functions to subvert go's type & memory protections,
+// and expose unexported values & functions.
 //
 // This is not a power to be taken lightly! It's expected that you're fully
 // versed in how the go type system works, and why there are protections and
 // restrictions in the first place. Using this package incorrectly will quickly
-// lead to undefined behavior and bizarre crashes, perhaps even segfaults or
-// nuclear missile launches.
-//
+// lead to undefined behavior and bizarre crashes, even segfaults or nuclear
+// missile launches.
+
 // YOU HAVE BEEN WARNED!
 package subvert
 
@@ -21,27 +14,22 @@ import (
 	"bytes"
 	"debug/gosym"
 	"fmt"
+	"io"
 	"log"
+	"math"
 	"os"
 	"reflect"
 	"unsafe"
 )
 
-// IsEnabled checks if initialization succeeded. If this function returns false,
-// Calling other functions in this package will panic.
-//
-// Initialization will only fail if the assertions this package makes about
-// certain internal golang type structures turn out to be false in the newer
-// version of go you are compiling with.
-func IsEnabled() bool {
-	return failureReason == ""
-}
-
 // MakeWritable clears a value's RO flags. The RO flags are generally used to
 // determine whether a value is exported (and thus accessible) or not.
-func MakeWritable(v *reflect.Value) {
-	assertIsEnabled()
+func MakeWritable(v *reflect.Value) error {
+	if !flagsFound {
+		return flagsError
+	}
 	*getFlagPtr(v) &= ^flagRO
+	return nil
 }
 
 // MakeAddressable adds the addressable flag to a value, allowing you to take
@@ -49,9 +37,32 @@ func MakeWritable(v *reflect.Value) {
 // because it's allocated on the stack. Making a pointer to a stack value will
 // cause undefined behavior if you attempt to access it outside of the
 // stack-allocated object's scope.
-func MakeAddressable(v *reflect.Value) {
-	assertIsEnabled()
+func MakeAddressable(v *reflect.Value) error {
+	if !flagsFound {
+		return flagsError
+	}
 	*getFlagPtr(v) |= flagAddr
+	return nil
+}
+
+// SliceAtAddress turns a memory range into a slice that can be read in goland.
+//
+// Warning: This function makes no warranty as to whether the memory is
+// accessible or writable!
+func SliceAtAddress(address uintptr, length int) []byte {
+	return (*[math.MaxInt32]byte)(unsafe.Pointer(address))[:length:length]
+}
+
+// PatchMemory applies a patch to the specified memory location. If that memory
+// is protected, it will be made temporarily writable.
+func PatchMemory(address uintptr, patch []byte) (oldMemory []byte, err error) {
+	memory := SliceAtAddress(address, len(patch))
+	oldMemory = make([]byte, len(memory))
+	copy(oldMemory, memory)
+	err = applyToProtectedMemory(address, len(patch), func() {
+		copy(memory, patch)
+	})
+	return
 }
 
 // ExposeFunction exposes a function or method, allowing you to bypass export
@@ -73,41 +84,62 @@ func MakeAddressable(v *reflect.Value) {
 //       f := exposed.(func() string)
 //       fmt.Printf("Result of reflect.methodName: %v\n", f())
 //   }
-func ExposeFunction(funcSymName string, templateFunc interface{}) interface{} {
-	assertIsEnabled()
-	loadSymbolTable()
-	if symTableLoadFailed {
-		return nil
+func ExposeFunction(funcSymName string, templateFunc interface{}) (function interface{}, err error) {
+	if err = ensureSymbolTableIsLoaded(); err != nil {
+		return
 	}
 
-	fn := symTable.LookupFunc(funcSymName)
+	fn := symbolTable.LookupFunc(funcSymName)
 	if fn == nil {
-		return nil
+		err = fmt.Errorf("Could not find function symbol %v", funcSymName)
+		return
 	}
-	rf := reflect.MakeFunc(reflect.TypeOf(templateFunc), func([]reflect.Value) []reflect.Value {
+	rFunc := reflect.MakeFunc(reflect.TypeOf(templateFunc), func([]reflect.Value) []reflect.Value {
 		return []reflect.Value{}
 	})
-	oldFlag := *getFlagPtr(&rf)
-	MakeAddressable(&rf)
-	fPtr := (*unsafe.Pointer)(unsafe.Pointer(rf.UnsafeAddr()))
+	oldFlag := *getFlagPtr(&rFunc)
+	if err = MakeAddressable(&rFunc); err != nil {
+		return
+	}
+	fPtr := (*unsafe.Pointer)(unsafe.Pointer(rFunc.UnsafeAddr()))
 	*fPtr = unsafe.Pointer(uintptr(fn.Entry))
-	*getFlagPtr(&rf) = oldFlag
-	return rf.Interface()
+	*getFlagPtr(&rFunc) = oldFlag
+	function = rFunc.Interface()
+	return
 }
 
 // AllFunctions returns the name of every function that has been compiled
 // into the current binary. Use it as a debug helper to see if a function
 // has been compiled in or not.
-func AllFunctions() (functions map[string]bool) {
+func AllFunctions() (functions map[string]bool, err error) {
+	if err = ensureSymbolTableIsLoaded(); err != nil {
+		return
+	}
+
 	functions = make(map[string]bool)
-	for _, function := range symTable.Funcs {
+	for _, function := range symbolTable.Funcs {
 		functions[function.Name] = true
 	}
 	return
 }
 
-const failureFmt = "go-subvert is disabled because %v. Please open an issue " +
-	"at https://github.com/kstenerud/go-subvert/issues"
+var (
+	flagAddr uintptr
+	flagRO   uintptr
+
+	flagOffset uintptr
+	flagsFound bool
+	flagsError = fmt.Errorf("This function is disabled because the internal " +
+		"flags structure has changed with this go release. Please open " +
+		"an issue at https://github.com/kstenerud/go-subvert/issues/new")
+
+	symbolTable          *gosym.Table
+	symbolTableLoadError error
+)
+
+func init() {
+	initReflectValueFlags()
+}
 
 type flagTester struct {
 	A   int // reflect/value.go: flagAddr
@@ -116,20 +148,11 @@ type flagTester struct {
 	// Note: flagRO = flagStickyRO | flagEmbedRO as of go 1.5
 }
 
-var (
-	flagAddr uintptr
-	flagRO   uintptr
-)
-
-var flagOffset uintptr
-var failureReason string
-var symTable *gosym.Table
-var symTableLoadFailed bool
-
-func init() {
+func initReflectValueFlags() {
 	fail := func(reason string) {
-		failureReason = reason
-		log.Println(fmt.Sprintf(failureFmt, failureReason))
+		flagsFound = false
+		log.Println(fmt.Sprintf("reflect.Value flags could not be determined because %v."+
+			"Please open an issue at https://github.com/kstenerud/go-subvert/issues", reason))
 	}
 	getFlag := func(v reflect.Value) uintptr {
 		return uintptr(reflect.ValueOf(v).FieldByName("flag").Uint())
@@ -158,57 +181,42 @@ func init() {
 		fail("reflect.Value.flag no longer has a flagAddr bit")
 		return
 	}
+	flagsFound = true
 }
 
-func assertIsEnabled() {
-	if !IsEnabled() {
-		panic(fmt.Errorf(failureFmt, failureReason))
-	}
-}
-
-func getFlagPtr(v *reflect.Value) *uintptr {
-	return (*uintptr)(unsafe.Pointer(uintptr(unsafe.Pointer(v)) + flagOffset))
-}
-
-func loadSymbolTable() {
-	if symTable != nil || symTableLoadFailed {
-		return
+func ensureSymbolTableIsLoaded() (err error) {
+	if symbolTableLoadError != nil || symbolTable != nil {
+		return symbolTableLoadError
 	}
 
-	var err error
+	var reader io.ReaderAt
+
 	if canLoadSymbolsFromMemory {
-		symTable, err = loadSymbolsFromMemory()
-		if err == nil {
+		reader = bytes.NewReader(SliceAtAddress(processStartAddress, 0x10000000))
+		if symbolTable, err = readSymbols(reader); err == nil {
+			// Successfully loaded from memory
 			return
 		}
 	}
 
-	symTable, err = loadSymbolsFromExe()
-	if err != nil {
-		log.Printf("subvert: Error loading symbol table: %v", err)
-		symTableLoadFailed = true
+	// If memory load fails, read from disk
+
+	var exePath string
+	if exePath, err = os.Executable(); err != nil {
+		symbolTableLoadError = err
 		return
 	}
 
+	if reader, err = os.Open(exePath); err != nil {
+		symbolTableLoadError = err
+		return
+	}
+
+	symbolTable, err = readSymbols(reader)
+	symbolTableLoadError = err
+	return
 }
 
-func loadSymbolsFromMemory() (symTable *gosym.Table, err error) {
-	const maxSize = 0x10000000
-	processMemory := (*[maxSize]byte)(unsafe.Pointer(processStartAddress))[:maxSize:maxSize]
-	reader := bytes.NewReader(processMemory)
-	return readSymbols(reader)
-}
-
-func loadSymbolsFromExe() (symTable *gosym.Table, err error) {
-	exePath, err := os.Executable()
-	if err != nil {
-		return
-	}
-
-	reader, err := os.Open(exePath)
-	if err != nil {
-		return
-	}
-
-	return readSymbols(reader)
+func getFlagPtr(v *reflect.Value) *uintptr {
+	return (*uintptr)(unsafe.Pointer(uintptr(unsafe.Pointer(v)) + flagOffset))
 }

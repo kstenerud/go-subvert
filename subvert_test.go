@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"runtime"
 	"testing"
+	"unsafe"
 )
 
 type SubvertTester struct {
@@ -12,6 +13,8 @@ type SubvertTester struct {
 	a int
 	int
 }
+
+const constString = "testing"
 
 func Demonstrate() {
 	v := SubvertTester{1, 2, 3}
@@ -23,24 +26,53 @@ func Demonstrate() {
 
 	fmt.Printf("Interface of A: %v\n", rv_A.Interface())
 
+	// MakeWritable
+
 	// rv_a.Interface() // This would panic
-	MakeWritable(&rv_a)
-	fmt.Printf("Interface of a: %v\n", rv_a.Interface())
+	if err := MakeWritable(&rv_a); err != nil {
+		// TODO: Handle this
+	} else {
+		fmt.Printf("Interface of a: %v\n", rv_a.Interface())
+	}
 
 	// rv_int.Interface() // This would panic
-	MakeWritable(&rv_int)
-	fmt.Printf("Interface of int: %v\n", rv_int.Interface())
+	if err := MakeWritable(&rv_int); err != nil {
+		// TODO: Handle this
+	} else {
+		fmt.Printf("Interface of int: %v\n", rv_int.Interface())
+	}
+
+	// MakeAddressable
 
 	// rv.Addr() // This would panic
-	MakeAddressable(&rv)
-	fmt.Printf("Pointer to v: %v\n", rv.Addr())
+	if err := MakeAddressable(&rv); err != nil {
+		// TODO: Handle this
+	} else {
+		fmt.Printf("Pointer to v: %v\n", rv.Addr())
+	}
 
-	// The test rig messes up PE symbols somehow
-	if runtime.GOOS != "windows" {
-		exposed := ExposeFunction("reflect.methodName", (func() string)(nil))
-		if exposed != nil {
-			f := exposed.(func() string)
-			fmt.Printf("Result of reflect.methodName: %v\n", f())
+	// ExposeFunction
+
+	exposed, err := ExposeFunction("reflect.methodName", (func() string)(nil))
+	if err != nil {
+		// TODO: Handle this
+	} else {
+		f := exposed.(func() string)
+		fmt.Printf("Result of reflect.methodName: %v\n", f())
+	}
+
+	// PatchMemory
+
+	rv = reflect.ValueOf(constString)
+	if err := MakeAddressable(&rv); err != nil {
+		// TODO: Handle this
+	} else {
+		strAddr := rv.Addr().Pointer()
+		strBytes := *((*unsafe.Pointer)(unsafe.Pointer(strAddr)))
+		if oldMem, err := PatchMemory(uintptr(strBytes), []byte("XX")); err != nil {
+			// TODO: Handle this
+		} else {
+			fmt.Printf("constString is now: %v, Oldmem = %v\n", constString, string(oldMem))
 		}
 	}
 }
@@ -68,13 +100,6 @@ func assertDoesNotPanic(t *testing.T, function func()) {
 	}
 }
 
-func TestEnabled(t *testing.T) {
-	if !IsEnabled() {
-		t.Error("IsEnabled() returned false. Check the logs and send an " +
-			"error report to https://github.com/kstenerud/go-subvert/issues")
-	}
-}
-
 func TestDemonstrate(t *testing.T) {
 	Demonstrate()
 }
@@ -83,7 +108,9 @@ func TestAddressable(t *testing.T) {
 	rv := reflect.ValueOf(1)
 
 	assertPanics(t, func() { rv.Addr() })
-	MakeAddressable(&rv)
+	if err := MakeAddressable(&rv); err != nil {
+		t.Error(err)
+	}
 	rv.Addr()
 }
 
@@ -97,21 +124,37 @@ func TestWritable(t *testing.T) {
 	rv_A.Interface()
 
 	assertPanics(t, func() { rv_a.Interface() })
-	MakeWritable(&rv_a)
+	if err := MakeWritable(&rv_a); err != nil {
+		t.Error(err)
+		return
+	}
 	rv_a.Interface()
 
 	assertPanics(t, func() { rv_int.Interface() })
-	MakeWritable(&rv_int)
+	if err := MakeWritable(&rv_int); err != nil {
+		t.Error(err)
+		return
+	}
 	rv_int.Interface()
 }
 
 func TestExposeFunction(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		fmt.Printf("Skipping TestExposeFunction because it doesn't work in test binaries on this platform\n")
+		return
+	}
+
 	assertDoesNotPanic(t, func() {
-		f := ExposeFunction("reflect.methodName", (func() string)(nil)).(func() string)
-		if f == nil {
-			t.Errorf("Cannot find reflect.methodName. This test is no longer valid.")
+		exposed, err := ExposeFunction("reflect.methodName", (func() string)(nil))
+		if err != nil {
+			t.Error(err)
 			return
 		}
+		if exposed == nil {
+			t.Errorf("exposed should not be nil")
+			return
+		}
+		f := exposed.(func() string)
 		expected := "github.com/kstenerud/go-subvert.getPanic"
 		actual := f()
 		if actual != expected {
@@ -120,9 +163,34 @@ func TestExposeFunction(t *testing.T) {
 	})
 }
 
-func TestListAllFunctions(t *testing.T) {
-	funcs := AllFunctions()
-	if len(funcs) == 0 {
-		t.Errorf("Expected at least one function")
+func TestPatchMemory(t *testing.T) {
+	// Note: If two const strings have the same value, they will occupy the same
+	// location in memory! Thus myStr was made with a different value from
+	// constString
+	const myStr = "some test"
+	rv := reflect.ValueOf(myStr)
+	if err := MakeAddressable(&rv); err != nil {
+		t.Error(err)
+		return
+	}
+	strAddr := rv.Addr().Pointer()
+	strBytes := *((*unsafe.Pointer)(unsafe.Pointer(strAddr)))
+	oldMem, err := PatchMemory(uintptr(strBytes)+5, []byte("XXXX"))
+	if err != nil {
+		t.Error(err)
+		return
+	}
+
+	expectedOldMem := "test"
+	if string(oldMem) != expectedOldMem {
+		t.Errorf("Expected oldMem to be %v but got %v", expectedOldMem, string(oldMem))
+		return
+	}
+
+	expected := "some XXXX"
+	// Note: Comparing myStr will fail due to cached static data. You must copy it first.
+	actual := myStr
+	if actual != expected {
+		t.Errorf("Expected %v but got %v", expected, actual)
 	}
 }

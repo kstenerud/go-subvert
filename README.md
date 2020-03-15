@@ -1,8 +1,8 @@
 Subvert
 =======
 
-Package subvert provides functions to subvert go's type protections and
-expose unexported values & functions.
+Package subvert provides functions to subvert go's type & memory protections,
+and expose unexported values & functions.
 
 This is not a power to be taken lightly! It's expected that you're fully
 versed in how the go type system works, and why there are protections and
@@ -13,17 +13,6 @@ missile launches.
 YOU HAVE BEEN WARNED!
 
 
-#### Note:
-
-As this package modifies internal type data, there's no guarantee that it
-will continue to work in future versions of go (although an incompatible
-change has yet to happen, so it seems stable enough). If, in future, an
-incompatible change were to be introduced, `IsEnabled()` would return false
-when this package is built using that particular version of go. It's on you
-to check `IsEnabled()` as part of your CI process (or just run the unit tests
-in this package).
-
-
 
 Example
 -------
@@ -32,6 +21,7 @@ Example
 import (
 	"fmt"
 	"reflect"
+	"unsafe"
 
 	"github.com/kstenerud/go-subvert"
 )
@@ -41,6 +31,8 @@ type SubvertTester struct {
 	a int
 	int
 }
+
+const constString = "testing"
 
 func Demonstrate() {
 	v := SubvertTester{1, 2, 3}
@@ -52,23 +44,49 @@ func Demonstrate() {
 
 	fmt.Printf("Interface of A: %v\n", rv_A.Interface())
 
+	// MakeWritable
+
 	// rv_a.Interface() // This would panic
-	subvert.MakeWritable(&rv_a)
+	if err := subvert.MakeWritable(&rv_a); err != nil {
+		// TODO: Handle this
+	}
 	fmt.Printf("Interface of a: %v\n", rv_a.Interface())
 
 	// rv_int.Interface() // This would panic
-	subvert.MakeWritable(&rv_int)
+	if err := subvert.MakeWritable(&rv_int); err != nil {
+		// TODO: Handle this
+	}
 	fmt.Printf("Interface of int: %v\n", rv_int.Interface())
 
+	// MakeAddressable
+
 	// rv.Addr() // This would panic
-	subvert.MakeAddressable(&rv)
+	if err := subvert.MakeAddressable(&rv); err != nil {
+		// TODO: Handle this
+	}
 	fmt.Printf("Pointer to v: %v\n", rv.Addr())
 
-	exposed := ExposeFunction("reflect.methodName", (func() string)(nil))
-	if exposed != nil {
-		f := exposed.(func() string)
-		fmt.Printf("Result of reflect.methodName: %v\n", f())
+	// ExposeFunction
+
+	exposed, err := subvert.ExposeFunction("reflect.methodName", (func() string)(nil))
+	if err != nil {
+		// TODO: Handle this
 	}
+	f := exposed.(func() string)
+	fmt.Printf("Result of reflect.methodName: %v\n", f())
+
+	// PatchMemory
+
+	rv = reflect.ValueOf(constString)
+	if err := subvert.MakeAddressable(&rv); err != nil {
+		// TODO: Handle this
+	}
+	strAddr := rv.Addr().Pointer()
+	strBytes := *((*unsafe.Pointer)(unsafe.Pointer(strAddr)))
+	if oldMem, err := subvert.PatchMemory(uintptr(strBytes), []byte("XX")); err != nil {
+		// TODO: Handle this
+	}
+	fmt.Printf("constString is now: %v, Oldmem = %v\n", constString, string(oldMem))
 }
 ```
 
@@ -80,6 +98,7 @@ Interface of a: 2
 Interface of int: 3
 Pointer to v: &{1 2 3}
 Result of reflect.methodName: github.com/kstenerud/go-subvert.TestDemonstrate
+constString is now: XXsting, Oldmem = te
 ```
 
 
