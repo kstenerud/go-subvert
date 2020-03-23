@@ -1,0 +1,5 @@
+github.com/kstenerud/go-subvert v1.2.1 h1:vI+WhK84UfMnn45f8c/J8ek12CKSSspzbeahm7atCDc=
+github.com/kstenerud/go-subvert v1.2.1/go.mod h1:GIfTzLfEoc6N+W/hE5rYqwJuVBGNML9vL3C2isQi6pw=
+golang.org/x/arch v0.0.0-20200312215426-ff8b605520f4 h1:cZG+Ns0n5bdEEsURGnDinFswSebRNMqspbLvxrLZoIc=
+golang.org/x/arch v0.0.0-20200312215426-ff8b605520f4/go.mod h1:flIaEI6LNU6xOCD5PaJvn9wGP0agmIOqjrtsKGRguv4=
+rsc.io/pdf v0.1.1/go.mod h1:n8OzWcQ6Sp37PL01nO98y4iUCRdTGarVfzxY20ICaU4=

@@ -11,13 +11,8 @@
 package subvert
 
 import (
-	"bytes"
 	"debug/gosym"
-	"fmt"
-	"io"
-	"log"
 	"math"
-	"os"
 	"reflect"
 	"unsafe"
 )
@@ -25,41 +20,51 @@ import (
 // MakeWritable clears a value's RO flags. The RO flags are generally used to
 // determine whether a value is exported (and thus accessible) or not.
 func MakeWritable(v *reflect.Value) error {
-	if !flagsFound {
-		return flagsError
+	if !rvFlagsFound {
+		return rvFlagsError
 	}
-	*getFlagPtr(v) &= ^flagRO
+	*getRVFlagPtr(v) &= ^rvFlagRO
 	return nil
 }
 
 // MakeAddressable adds the addressable flag to a value, allowing you to take
 // its address. The most common reason for making an object non-addressable is
-// because it's allocated on the stack. Making a pointer to a stack value will
-// cause undefined behavior if you attempt to access it outside of the
-// stack-allocated object's scope.
+// because it's allocated on the stack or in read-only memory.
+//
+// Making a pointer to a stack value will cause undefined behavior if you
+// attempt to access it outside of the stack-allocated object's scope.
+//
+// Do not write to an object in read-only memory. It would be bad.
 func MakeAddressable(v *reflect.Value) error {
-	if !flagsFound {
-		return flagsError
+	if !rvFlagsFound {
+		return rvFlagsError
 	}
-	*getFlagPtr(v) |= flagAddr
+	*getRVFlagPtr(v) |= rvFlagAddr
 	return nil
 }
 
-// SliceAtAddress turns a memory range into a slice that can be read in goland.
+// SliceAtAddress turns a memory range into a go slice.
 //
-// Warning: This function makes no warranty as to whether the memory is
-// accessible or writable!
+// No checks are made as to whether the memory is writable or even readable.
+//
+// Do not append to the slice.
 func SliceAtAddress(address uintptr, length int) []byte {
 	return (*[math.MaxInt32]byte)(unsafe.Pointer(address))[:length:length]
 }
 
-// PatchMemory applies a patch to the specified memory location. If that memory
-// is protected, it will be made temporarily writable.
+// GetSliceAddr gets the address of a slice
+func GetSliceAddr(slice []byte) uintptr {
+	pSlice := (*unsafe.Pointer)((unsafe.Pointer)(&slice))
+	return uintptr(*pSlice)
+}
+
+// PatchMemory applies a patch to the specified memory location. If the memory
+// is read-only, it will be made temporarily writable while the patch is applied.
 func PatchMemory(address uintptr, patch []byte) (oldMemory []byte, err error) {
 	memory := SliceAtAddress(address, len(patch))
 	oldMemory = make([]byte, len(memory))
 	copy(oldMemory, memory)
-	err = applyToProtectedMemory(address, len(patch), func() {
+	err = applyToProtectedMemory(address, uintptr(len(patch)), func() {
 		copy(memory, patch)
 	})
 	return
@@ -85,138 +90,52 @@ func PatchMemory(address uintptr, patch []byte) (oldMemory []byte, err error) {
 //       fmt.Printf("Result of reflect.methodName: %v\n", f())
 //   }
 func ExposeFunction(funcSymName string, templateFunc interface{}) (function interface{}, err error) {
-	if err = ensureSymbolTableIsLoaded(); err != nil {
+	fn, err := getFunctionSymbolByName(funcSymName)
+	if err != nil {
 		return
 	}
+	return newFunctionWithImplementation(templateFunc, uintptr(fn.Entry))
+}
 
-	fn := symbolTable.LookupFunc(funcSymName)
-	if fn == nil {
-		err = fmt.Errorf("Could not find function symbol %v", funcSymName)
-		return
-	}
-	rFunc := reflect.MakeFunc(reflect.TypeOf(templateFunc), func([]reflect.Value) []reflect.Value {
-		return []reflect.Value{}
-	})
-	oldFlag := *getFlagPtr(&rFunc)
+// AliasFunction returns a new function object that calls the same underlying
+// code as the original function.
+func AliasFunction(function interface{}) (aliasedFunction interface{}, err error) {
+	rFunc := reflect.ValueOf(function)
 	if err = MakeAddressable(&rFunc); err != nil {
 		return
 	}
-	fPtr := (*unsafe.Pointer)(unsafe.Pointer(rFunc.UnsafeAddr()))
-	*fPtr = unsafe.Pointer(uintptr(fn.Entry))
-	*getFlagPtr(&rFunc) = oldFlag
-	function = rFunc.Interface()
-	return
+	fAddr := *(*unsafe.Pointer)(unsafe.Pointer(rFunc.UnsafeAddr()))
+	return newFunctionWithImplementation(function, uintptr(fAddr))
+}
+
+// GetSymbolTable loads (if necessary) and returns the symbol table for this process
+func GetSymbolTable() (*gosym.Table, error) {
+	if symTable == nil && symTableLoadError == nil {
+		symTable, symTableLoadError = loadSymbolTable()
+	}
+
+	return symTable, symTableLoadError
 }
 
 // AllFunctions returns the name of every function that has been compiled
 // into the current binary. Use it as a debug helper to see if a function
 // has been compiled in or not.
 func AllFunctions() (functions map[string]bool, err error) {
-	if err = ensureSymbolTableIsLoaded(); err != nil {
+	var table *gosym.Table
+	if table, err = GetSymbolTable(); err != nil {
 		return
 	}
 
 	functions = make(map[string]bool)
-	for _, function := range symbolTable.Funcs {
+	for _, function := range table.Funcs {
 		functions[function.Name] = true
 	}
 	return
 }
 
-var (
-	flagAddr uintptr
-	flagRO   uintptr
-
-	flagOffset uintptr
-	flagsFound bool
-	flagsError = fmt.Errorf("This function is disabled because the internal " +
-		"flags structure has changed with this go release. Please open " +
-		"an issue at https://github.com/kstenerud/go-subvert/issues/new")
-
-	symbolTable          *gosym.Table
-	symbolTableLoadError error
-)
-
 func init() {
-	initReflectValueFlags()
+	initReflectValue()
+	initProcess()
 }
 
-type flagTester struct {
-	A   int // reflect/value.go: flagAddr
-	a   int // reflect/value.go: flagStickyRO
-	int     // reflect/value.go: flagEmbedRO
-	// Note: flagRO = flagStickyRO | flagEmbedRO as of go 1.5
-}
-
-func initReflectValueFlags() {
-	fail := func(reason string) {
-		flagsFound = false
-		log.Println(fmt.Sprintf("reflect.Value flags could not be determined because %v."+
-			"Please open an issue at https://github.com/kstenerud/go-subvert/issues", reason))
-	}
-	getFlag := func(v reflect.Value) uintptr {
-		return uintptr(reflect.ValueOf(v).FieldByName("flag").Uint())
-	}
-	getFldFlag := func(v reflect.Value, fieldName string) uintptr {
-		return getFlag(v.FieldByName(fieldName))
-	}
-
-	if field, ok := reflect.TypeOf(reflect.Value{}).FieldByName("flag"); ok {
-		flagOffset = field.Offset
-	} else {
-		fail("reflect.Value no longer has a flag field")
-		return
-	}
-
-	v := flagTester{}
-	rv := reflect.ValueOf(&v).Elem()
-	flagRO = (getFldFlag(rv, "a") | getFldFlag(rv, "int")) ^ getFldFlag(rv, "A")
-	if flagRO == 0 {
-		fail("reflect.Value.flag no longer has flagEmbedRO or flagStickyRO bit")
-		return
-	}
-
-	flagAddr = getFlag(reflect.ValueOf(int(1))) ^ getFldFlag(rv, "A")
-	if flagAddr == 0 {
-		fail("reflect.Value.flag no longer has a flagAddr bit")
-		return
-	}
-	flagsFound = true
-}
-
-func ensureSymbolTableIsLoaded() (err error) {
-	if symbolTableLoadError != nil || symbolTable != nil {
-		return symbolTableLoadError
-	}
-
-	var reader io.ReaderAt
-
-	if canLoadSymbolsFromMemory {
-		reader = bytes.NewReader(SliceAtAddress(processStartAddress, 0x10000000))
-		if symbolTable, err = readSymbols(reader); err == nil {
-			// Successfully loaded from memory
-			return
-		}
-	}
-
-	// If memory load fails, read from disk
-
-	var exePath string
-	if exePath, err = os.Executable(); err != nil {
-		symbolTableLoadError = err
-		return
-	}
-
-	if reader, err = os.Open(exePath); err != nil {
-		symbolTableLoadError = err
-		return
-	}
-
-	symbolTable, err = readSymbols(reader)
-	symbolTableLoadError = err
-	return
-}
-
-func getFlagPtr(v *reflect.Value) *uintptr {
-	return (*uintptr)(unsafe.Pointer(uintptr(unsafe.Pointer(v)) + flagOffset))
-}
+const is64BitUintptr = uint64(^uintptr(0)) == ^uint64(0)

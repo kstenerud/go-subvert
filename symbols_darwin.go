@@ -1,11 +1,11 @@
-// +build !windows,!darwin
+// +build darwin
 
 package subvert
 
 import (
 	"bytes"
-	"debug/elf"
 	"debug/gosym"
+	"debug/macho"
 	"fmt"
 	"io"
 	"os"
@@ -36,22 +36,21 @@ func osReadSymbolsFromExeFile() (symTable *gosym.Table, err error) {
 }
 
 func osReadSymbols(reader io.ReaderAt) (symTable *gosym.Table, err error) {
-	exe, err := elf.NewFile(reader)
+	exe, err := macho.NewFile(reader)
 	if err != nil {
 		return
 	}
 	defer exe.Close()
 
-	sect := exe.Section(".text")
-	if sect == nil {
-		err = fmt.Errorf("Unable to find ELF .text section")
+	var sect *macho.Section
+	if sect = exe.Section("__text"); sect == nil {
+		err = fmt.Errorf("Unable to find Mach-O __text section")
 		return
 	}
 	textStart := sect.Addr
 
-	sect = exe.Section(".gopclntab")
-	if sect == nil {
-		err = fmt.Errorf("Unable to find ELF .gopclntab section")
+	if sect = exe.Section("__gopclntab"); sect == nil {
+		err = fmt.Errorf("Unable to find Mach-O __gopclntab section")
 		return
 	}
 	lineTableData, err := sect.Data()

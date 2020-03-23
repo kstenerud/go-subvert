@@ -3,16 +3,42 @@
 package subvert
 
 import (
+	// "bytes"
 	"debug/gosym"
 	"debug/pe"
 	"fmt"
 	"io"
+	"os"
 )
 
-const canLoadSymbolsFromMemory = false
-const processStartAddress = uintptr(0x400000)
+func osReadSymbolsFromMemory() (symTable *gosym.Table, err error) {
+	if processBaseAddress == 0 {
+		return nil, fmt.Errorf("Base address not found")
+	}
 
-func readSymbols(reader io.ReaderAt) (symTable *gosym.Table, err error) {
+	return nil, fmt.Errorf("TODO: Fails with: fail to read string table: unexpected EOF")
+
+	// reader := bytes.NewReader(SliceAtAddress(processBaseAddress, 0x2c4000))
+	// return osReadSymbols(reader)
+}
+
+func osReadSymbolsFromExeFile() (symTable *gosym.Table, err error) {
+	var exePath string
+	if exePath, err = os.Executable(); err != nil {
+		symTableLoadError = err
+		return
+	}
+
+	var reader io.ReaderAt
+	if reader, err = os.Open(exePath); err != nil {
+		symTableLoadError = err
+		return
+	}
+
+	return osReadSymbols(reader)
+}
+
+func osReadSymbols(reader io.ReaderAt) (symTable *gosym.Table, err error) {
 	exe, err := pe.NewFile(reader)
 	if err != nil {
 		return

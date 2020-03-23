@@ -110,6 +110,7 @@ func TestAddressable(t *testing.T) {
 	assertPanics(t, func() { rv.Addr() })
 	if err := MakeAddressable(&rv); err != nil {
 		t.Error(err)
+		return
 	}
 	rv.Addr()
 }
@@ -140,7 +141,7 @@ func TestWritable(t *testing.T) {
 
 func TestExposeFunction(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		fmt.Printf("Skipping TestExposeFunction because it doesn't work in test binaries on this platform\n")
+		fmt.Printf("Skipping TestExposeFunction because it doesn't work in test binaries on this platform. Please run standalone_test.\n")
 		return
 	}
 
@@ -159,6 +160,7 @@ func TestExposeFunction(t *testing.T) {
 		actual := f()
 		if actual != expected {
 			t.Errorf("Expected [%v] but got [%v]", expected, actual)
+			return
 		}
 	})
 }
@@ -192,5 +194,34 @@ func TestPatchMemory(t *testing.T) {
 	actual := myStr
 	if actual != expected {
 		t.Errorf("Expected %v but got %v", expected, actual)
+	}
+}
+
+func TestSliceAddr(t *testing.T) {
+	expected := "abcd"
+	addr := GetSliceAddr([]byte(expected))
+	actual := string(SliceAtAddress(addr, 4))
+	if actual != expected {
+		t.Errorf("Expected %v but got %v", expected, actual)
+	}
+}
+
+//go:noinline
+func zFunc() string {
+	return "z"
+}
+
+func TestAliasFunction(t *testing.T) {
+	fIntf, err := AliasFunction(zFunc)
+	if err != nil {
+		t.Error(err)
+		return
+	}
+	f := fIntf.(func() string)
+
+	expected := "z"
+	actual := f()
+	if actual != expected {
+		t.Errorf("Expected %v, but got %v", expected, actual)
 	}
 }

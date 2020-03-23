@@ -1,8 +1,15 @@
 Subvert
 =======
 
-Package subvert provides functions to subvert go's type & memory protections,
-and expose unexported values & functions.
+Package subvert provides functions to subvert go's runtime system, allowing you to:
+
+* Get addresses of stack-allocated or otherwise protected values
+* Access unexported values
+* Call unexported functions
+* Apply patches to memory (even if it's read-only)
+* Make aliases to functions
+
+![Now I know what it feels like to be God!](power.gif)
 
 This is not a power to be taken lightly! It's expected that you're fully
 versed in how the go type system works, and why there are protections and
@@ -10,7 +17,7 @@ restrictions in the first place. Using this package incorrectly will quickly
 lead to undefined behavior and bizarre crashes, even segfaults or nuclear
 missile launches.
 
-YOU HAVE BEEN WARNED!
+**YOU HAVE BEEN WARNED!**
 
 
 
@@ -90,7 +97,7 @@ func Demonstrate() {
 }
 ```
 
-Prints:
+**Output:**
 
 ```
 Interface of A: 1
@@ -100,6 +107,7 @@ Pointer to v: &{1 2 3}
 Result of reflect.methodName: github.com/kstenerud/go-subvert.TestDemonstrate
 constString is now: XXsting, Oldmem = te
 ```
+
 
 
 License

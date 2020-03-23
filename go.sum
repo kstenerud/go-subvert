@@ -1,0 +1,5 @@
+github.com/kstenerud/go-describe v1.2.5 h1:HbPBnrMT2nMnoQGfRe86N/2PvroGJARktzW/2gqUt8Q=
+github.com/kstenerud/go-describe v1.2.5/go.mod h1:B8yQFOOLtn5swMynH15MmfeKQAxgw3CyOlHv4ihxq7Y=
+golang.org/x/arch v0.0.0-20200312215426-ff8b605520f4 h1:cZG+Ns0n5bdEEsURGnDinFswSebRNMqspbLvxrLZoIc=
+golang.org/x/arch v0.0.0-20200312215426-ff8b605520f4/go.mod h1:flIaEI6LNU6xOCD5PaJvn9wGP0agmIOqjrtsKGRguv4=
+rsc.io/pdf v0.1.1/go.mod h1:n8OzWcQ6Sp37PL01nO98y4iUCRdTGarVfzxY20ICaU4=
